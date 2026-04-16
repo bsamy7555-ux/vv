@@ -1,0 +1,223 @@
+# bot_make_profile_site_modern.py
+import os
+import threading
+import uuid
+import html
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+import telebot
+
+# === إعدادات البوت ===
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8535496684:AAGt9-BayEnfVW1Wwfzvw_0Mi031dQ3TJok")
+HOST = "0.0.0.0"
+PORT = 8080
+
+PUBLIC_DIR = Path("public")
+IMAGES_DIR = PUBLIC_DIR / "images"
+PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+user_states = {}
+
+# ==== تصميم HTML احترافي (ألوان متدرجة + أيقونات SVG) ====
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{name} — Profile</title>
+<style>
+body {{
+  margin: 0;
+  font-family: "Poppins", sans-serif;
+  background: linear-gradient(135deg, #141e30, #243b55);
+  color: #fff;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}}
+.card {{
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 20px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  padding: 40px 30px;
+  text-align: center;
+  max-width: 420px;
+  width: 90%;
+  backdrop-filter: blur(10px);
+}}
+.avatar {{
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 4px solid rgba(255,255,255,0.15);
+  margin-bottom: 20px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+}}
+h1 {{
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+}}
+p.bio {{
+  margin: 10px 0 25px;
+  font-size: 15px;
+  color: #d6d6d6;
+}}
+.links {{
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}}
+.linkbtn {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-radius: 12px;
+  text-decoration: none;
+  color: #fff;
+  font-weight: 500;
+  transition: 0.3s ease;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}}
+.linkbtn:hover {{
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}}
+.instagram {{ background: linear-gradient(45deg, #feda75, #d62976, #962fbf, #4f5bd5); }}
+.tiktok {{ background: linear-gradient(45deg, #69C9D0, #EE1D52); }}
+.telegram {{ background: linear-gradient(45deg, #37AEE2, #1E96C8); }}
+.footer {{
+  font-size: 12px;
+  color: #ccc;
+  margin-top: 20px;
+}}
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="{photo}" class="avatar" alt="Profile Photo">
+    <h1>{name}</h1>
+    <p class="bio">{bio}</p>
+    <div class="links">
+      {buttons}
+    </div>
+    <div class="footer">Made with ❤️ via Telegram Bot</div>
+  </div>
+</body>
+</html>
+"""
+
+def make_button_html(platform, url):
+    class_name = platform.lower()
+    icon = {
+        "instagram": "📸",
+        "tiktok": "🎵",
+        "telegram": "✈️"
+    }.get(class_name, "🔗")
+    return f'<a href="{html.escape(url)}" target="_blank" class="linkbtn {class_name}">{icon} {platform}</a>'
+
+def create_profile_page(chat_id, data):
+    name = html.escape(data.get("name", "User"))
+    bio = html.escape(data.get("bio", ""))
+    photo = data.get("photo") or "https://i.imgur.com/5Jz8W7G.png"
+
+    buttons = []
+    if data.get("instagram"):
+        buttons.append(make_button_html("Instagram", f"https://instagram.com/{data['instagram']}"))
+    if data.get("tiktok"):
+        buttons.append(make_button_html("TikTok", f"https://tiktok.com/@{data['tiktok']}"))
+    if data.get("telegram"):
+        buttons.append(make_button_html("Telegram", f"https://t.me/{data['telegram']}"))
+    if not buttons:
+        buttons.append(make_button_html("Website", "#"))
+
+    html_text = HTML_TEMPLATE.format(name=name, bio=bio, photo=photo, buttons="\n".join(buttons))
+    filename = f"profile_{chat_id}_{uuid.uuid4().hex}.html"
+    (PUBLIC_DIR / filename).write_text(html_text, encoding="utf-8")
+    return filename
+
+# ========== حوار البوت ==========
+@bot.message_handler(commands=['start', 'create'])
+def start(message):
+    chat_id = message.chat.id
+    user_states[chat_id] = {"step": "name", "data": {}}
+    bot.reply_to(message, "مرحباً 👋\nأرسل اسمك أولاً (الذي سيظهر في الصفحة):")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    chat_id = message.chat.id
+    state = user_states.get(chat_id)
+    if not state or state["step"] != "photo":
+        return bot.reply_to(message, "أرسل /create للبدء من جديد.")
+    file_id = message.photo[-1].file_id
+    f = bot.get_file(file_id)
+    file_bytes = bot.download_file(f.file_path)
+    filename = f"{chat_id}_{uuid.uuid4().hex}.jpg"
+    filepath = IMAGES_DIR / filename
+    with open(filepath, "wb") as fh:
+        fh.write(file_bytes)
+    state["data"]["photo"] = f"images/{filename}"
+    state["step"] = "bio"
+    bot.reply_to(message, "تم حفظ الصورة ✅\nالآن أرسل وصفاً قصيراً عنك (bio).")
+
+@bot.message_handler(func=lambda msg: True)
+def handle_text(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
+    state = user_states.get(chat_id)
+    if not state:
+        return bot.reply_to(message, "أرسل /create للبدء.")
+
+    step = state["step"]
+    data = state["data"]
+
+    if step == "name":
+        data["name"] = text
+        state["step"] = "photo"
+        bot.reply_to(message, "الآن أرسل صورتك الشخصية أو اكتب 'skip' لتخطي.")
+    elif step == "photo":
+        if text.lower() == "skip":
+            data["photo"] = None
+            state["step"] = "bio"
+            bot.reply_to(message, "تخطي الصورة. أرسل الوصف (bio).")
+        else:
+            bot.reply_to(message, "أرسل الصورة كمرفق وليس نصًا.")
+    elif step == "bio":
+        data["bio"] = text
+        state["step"] = "instagram"
+        bot.reply_to(message, "أرسل اسم مستخدم Instagram أو اكتب 'skip'.")
+    elif step == "instagram":
+        data["instagram"] = None if text.lower() == "skip" else text.lstrip("@")
+        state["step"] = "tiktok"
+        bot.reply_to(message, "أرسل اسم مستخدم TikTok أو 'skip'.")
+    elif step == "tiktok":
+        data["tiktok"] = None if text.lower() == "skip" else text.lstrip("@")
+        state["step"] = "telegram"
+        bot.reply_to(message, "أرسل اسم مستخدم Telegram أو 'skip'.")
+    elif step == "telegram":
+        data["telegram"] = None if text.lower() == "skip" else text.lstrip("@")
+        filename = create_profile_page(chat_id, data)
+        url = f"http://localhost:{PORT}/{filename}"
+        bot.send_message(chat_id, f"✨ تم إنشاء صفحتك الاحترافية!\nافتح الرابط:\n{url}")
+        user_states.pop(chat_id, None)
+
+# ==== خادم HTTP محلي ====
+class MyHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(PUBLIC_DIR), **kwargs)
+
+def start_server():
+    server = ThreadingHTTPServer((HOST, PORT), MyHandler)
+    print(f"🌐 HTTP server running at http://{HOST}:{PORT}")
+    server.serve_forever()
+
+threading.Thread(target=start_server, daemon=True).start()
+print("🤖 البوت يعمل الآن...")
+bot.infinity_polling()
